@@ -1,0 +1,25 @@
+services:
+  opencode:
+    image: ghcr.io/asksven/opencode:0.18.18
+    container_name: opencode
+    #user: "1000"
+    restart: unless-stopped
+    # listen on all interfaces INSIDE the container, make sure to print logs to STDOUT
+    command: opencode serve --hostname 0.0.0.0 --port 4096 --print-logs --log-level DEBUG
+
+    ports:
+      - "127.0.0.1:4096:4096"
+
+    environment:
+      # set in .env
+      TZ: ${TZ}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      # Uncomment if you access this through the network
+      #OPENCODE_SERVER_USERNAME: ${OPENCODE_SERVER_USERNAME}
+      #OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD}
+    volumes:
+      - ./data/share:/home/opencode/.local/share/opencode
+      - ./data/state:/home/opencode/.local/state/opencode
+      - ./data/config:/home/opencode/.config/opencode
+      # If opencode will be used from VSCode we need to make sure that the directory "outside" is equal to the directory "inside" the container.
+      - /home/sven/opencode/projects:/home/sven/opencode/projects
