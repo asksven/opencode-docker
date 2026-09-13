@@ -1,6 +1,6 @@
 services:
   opencode:
-    image: ghcr.io/asksven/opencode:0.18.18
+    image: ghcr.io/asksven/opencode:1.18.18
     container_name: opencode
     #user: "1000"
     restart: unless-stopped
