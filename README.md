@@ -42,6 +42,19 @@ For persistent data and configuration, the following volumes can be mounted:
 - `./data/state:/home/opencode/.local/state/opencode`
 - `./data/config:/home/opencode/.config/opencode` - For configuration files, including `opencode.json` for OpenCode pre-configuration
 
+### Docker CLI Access
+
+The image includes the Docker CLI, Compose v2 plugin, and Buildx plugin, but does not include a Docker daemon. To use the CLI with a host daemon, explicitly mount the host socket:
+
+```bash
+docker run --rm \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  ghcr.io/asksven/opencode-docker:latest \
+  docker version
+```
+
+When the socket is mounted and the container uses the default root-starting entrypoint, the entrypoint grants the unprivileged process access through the socket's numeric group ID. Overriding the container user bypasses this setup and may make a `0660` socket inaccessible unless its groups are configured externally. Docker socket access is effectively root-level access to the host, so only enable this mount for trusted workloads.
+
 ### LLM Provider Authentication
 
 To authenticate with LLM providers, you can create an `auth.json` file in the `/home/opencode/.local/share/opencode` directory with the following structure:
@@ -78,6 +91,25 @@ For example, to whitelist specific models for the GitHub Copilot provider, you c
 
 The Docker image is built for both `linux/amd64` and `linux/arm64` architectures.
 Images are automatically pushed to GitHub Container Registry (`ghcr.io/asksven/opencode-docker`) with version tags matching OpenCode releases and a `latest` tag for the most recent release.
+
+To build and load a local image, build one platform at a time:
+
+```bash
+docker buildx build \
+  --load \
+  -t opencode-docker:local \
+  .
+```
+
+To publish a multi-platform image, authenticate to GitHub Container Registry, use a multi-platform-capable Buildx builder with native workers or binfmt/QEMU support, and replace `<tag>` with the desired image tag:
+
+```bash
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  --push \
+  -t ghcr.io/asksven/opencode-docker:<tag> \
+  .
+```
 
 ## Contributing
 

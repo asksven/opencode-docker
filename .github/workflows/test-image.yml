@@ -1,0 +1,57 @@
+name: Test Docker Image
+
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - entrypoint.sh
+      - tests/**
+      - .github/workflows/test-image.yml
+      - .github/workflows/update-image.yml
+  workflow_call:
+    inputs:
+      opencode_version:
+        description: OpenCode version to build and test
+        required: false
+        type: string
+        default: latest
+
+permissions:
+  contents: read
+
+jobs:
+  entrypoint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build all target platforms
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            OPENCODE_VERSION=${{ inputs.opencode_version || 'latest' }}
+
+      - name: Build runtime test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: opencode-docker:entrypoint-test
+          build-args: |
+            OPENCODE_VERSION=${{ inputs.opencode_version || 'latest' }}
+
+      - name: Test entrypoint
+        env:
+          REQUIRE_DOCKER_SOCKET: '1'
+        run: bash tests/test-entrypoint.sh opencode-docker:entrypoint-test

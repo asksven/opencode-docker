@@ -1,9 +1,22 @@
 name: Update Docker Image
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - Dockerfile
+      - entrypoint.sh
+      - .github/workflows/update-image.yml
   schedule:
     - cron: '*/15 * * * *'  # Every 15 minutes
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: Rebuild and publish even when the OpenCode version is unchanged
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: update-docker-image
@@ -19,7 +32,7 @@ jobs:
       contents: read
       packages: read
     outputs:
-      needs_update: ${{ steps.compare.outputs.needs_update }}
+      needs_update: ${{ steps.force.outputs.needs_update || steps.compare.outputs.needs_update }}
       version: ${{ steps.release.outputs.version }}
     steps:
       - name: Get latest stable release from feed
@@ -45,8 +58,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Force update for source changes
+        id: force
+        if: ${{ github.event_name == 'push' || inputs.force_rebuild }}
+        run: echo "needs_update=true" >> "$GITHUB_OUTPUT"
+
       - name: Compare against published manifests
         id: compare
+        if: ${{ github.event_name != 'push' && !inputs.force_rebuild }}
         run: |
           set -euo pipefail
           TARGET_VERSION="${{ steps.release.outputs.version }}"
@@ -67,9 +86,24 @@ jobs:
             echo "needs_update=true" >> "$GITHUB_OUTPUT"
           fi
 
-  build:
+  test:
     needs: check
-    if: needs.check.outputs.needs_update == 'true'
+    if: ${{ needs.check.outputs.needs_update == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/test-image.yml
+    with:
+      opencode_version: ${{ needs.check.outputs.version }}
+
+  publish:
+    needs: [check, test]
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.check.result == 'success' &&
+        needs.check.outputs.needs_update == 'true' &&
+        needs.test.result == 'success'
+      }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
