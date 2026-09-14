@@ -1,9 +1,22 @@
 name: Update Docker Image
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - Dockerfile
+      - entrypoint.sh
+      - .github/workflows/update-image.yml
   schedule:
-    - cron: '*/15 * * * *'  # Every 15 minutes
-  workflow_dispatch:  # Allow manual trigger
+    - cron: '0 0 * * *'  # Every day at 00:00 UTC
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: Rebuild and publish even when the OpenCode version is unchanged
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: update-docker-image
@@ -50,6 +63,11 @@ jobs:
         run: |
           set -euo pipefail
           TARGET_VERSION="${{ steps.release.outputs.version }}"
+
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.force_rebuild }}" = "true" ]; then
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           if ! docker manifest inspect "${IMAGE}:${TARGET_VERSION}" > /tmp/target.json 2>/dev/null; then
             echo "needs_update=true" >> "$GITHUB_OUTPUT"

@@ -157,6 +157,3 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"]
-
-# docker buildx build --platform linux/amd64,linux/arm64 \
-#   -t ghcr.io/asksven/opencode-docker:0.0.2 --output type=docker .
