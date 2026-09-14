@@ -13,9 +13,327 @@ The review identified four valid issues:
 
 Implement these fixes in a follow-up branch and pull request based on the merged `main` branch. Keep the changes focused on the review findings.
 
-## Implementation Review Findings
+## PR #2 Copilot Review Handover
 
-The original changes below have been implemented in the current worktree. The following findings remain outstanding and must be handled by Luna before the work is considered complete.
+This section is the authoritative implementation plan for the Copilot review on PR [#2](https://github.com/asksven/opencode-docker/pull/2). It supersedes the historical plan retained later in this document.
+
+Copilot reviewed PR #2 at commit `a19ecf584f9f5f4f41e154db2dd1bc28050c059c` and submitted two inline comments:
+
+1. [Publication is not gated on runtime tests](https://github.com/asksven/opencode-docker/pull/2#discussion_r4004123502).
+2. [The release polling interval changed from 15 minutes to daily](https://github.com/asksven/opencode-docker/pull/2#discussion_r4004123538).
+
+### Review Disposition
+
+#### Must Fix: Gate publication on successful image tests
+
+The first comment is valid and requires a workflow change. Both workflows currently run independently after relevant changes reach `main`:
+
+- `.github/workflows/test-image.yml` builds and tests the image.
+- `.github/workflows/update-image.yml` builds and pushes the image.
+
+Because neither workflow waits for the other, `update-image.yml` can publish while `test-image.yml` is still running, and can still publish if the test workflow later fails. The publish workflow must own an explicit dependency on the runtime test result.
+
+#### No Change: Preserve the once-daily schedule
+
+The second comment correctly identifies the behavioral change, but no correction is required. Changing the schedule to once daily was an explicit user requirement made after the initial plan. Preserve:
+
+```yaml
+schedule:
+  - cron: '0 0 * * *'  # Every day at 00:00 UTC
+```
+
+Do not restore the 15-minute cadence. The accepted tradeoff is that a new upstream OpenCode release can wait almost 24 hours before publication. Push-triggered source rebuilds and manual dispatches remain available independently of this daily polling cadence.
+
+## Target Workflow Design
+
+Use `test-image.yml` as both the pull-request test workflow and a reusable workflow called by `update-image.yml`.
+
+The intended flow is:
+
+```text
+Pull request affecting image code or tests:
+  test-image.yml -> build both platforms -> runtime entrypoint tests
+
+Relevant push to main, daily schedule, or manual dispatch:
+  update-image.yml/check
+    -> if no update: stop successfully
+    -> if update required: reusable test-image.yml
+      -> if tests fail or are cancelled: do not publish
+      -> if tests pass: update-image.yml/publish
+```
+
+This design is preferred over `workflow_run` because it keeps the update decision, required test, and publication in one visible job dependency graph. It also avoids passing state between independent workflow runs.
+
+## Required Implementation
+
+### 1. Make `test-image.yml` reusable
+
+File: `.github/workflows/test-image.yml`
+
+Keep the existing `pull_request` trigger and add `workflow_call` with a typed input:
+
+```yaml
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - entrypoint.sh
+      - tests/**
+      - .github/workflows/test-image.yml
+      - .github/workflows/update-image.yml
+  workflow_call:
+    inputs:
+      opencode_version:
+        description: OpenCode version to build and test
+        required: false
+        type: string
+        default: latest
+```
+
+Implementation requirements:
+
+- Remove the direct `push` trigger from `test-image.yml`. Push-triggered testing will be invoked by `update-image.yml`; retaining both paths would run duplicate tests and would not itself gate publication.
+- Add `.github/workflows/update-image.yml` to the pull-request path filter because changes to publication orchestration should exercise the reusable workflow before merge.
+- Keep workflow permissions at `contents: read` and do not request package write access.
+- Do not inherit or pass repository secrets into this reusable test workflow.
+- Keep QEMU setup and Buildx setup before image builds.
+- Keep the multi-platform validation build for `linux/amd64,linux/arm64`.
+- Keep the loaded native runtime image used by `tests/test-entrypoint.sh`.
+- Keep `REQUIRE_DOCKER_SOCKET: '1'` so missing socket coverage fails in CI instead of silently weakening the publication gate.
+
+### 2. Test the exact OpenCode version selected for publication
+
+File: `.github/workflows/test-image.yml`
+
+Both Docker build steps currently hard-code:
+
+```yaml
+OPENCODE_VERSION=latest
+```
+
+Replace that value with the reusable workflow input, while retaining `latest` as the fallback for direct pull-request runs:
+
+```yaml
+build-args: |
+  OPENCODE_VERSION=${{ inputs.opencode_version || 'latest' }}
+```
+
+Apply this to both:
+
+- `Build all target platforms`
+- `Build runtime test image`
+
+Behavior by invocation:
+
+- A pull-request event has no caller-supplied input and must test `latest`.
+- A call from `update-image.yml` must test the exact version emitted by the release-detection step.
+
+Do not rely solely on the `workflow_call` default for pull-request events; retain the explicit `|| 'latest'` fallback.
+
+### 3. Add a gated reusable test job to `update-image.yml`
+
+File: `.github/workflows/update-image.yml`
+
+Add a job after `check` and before the publishing job:
+
+```yaml
+  test:
+    needs: check
+    if: ${{ needs.check.outputs.needs_update == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/test-image.yml
+    with:
+      opencode_version: ${{ needs.check.outputs.version }}
+```
+
+Requirements:
+
+- Call the reusable workflow at job level with `uses`; do not attempt to call it from a step.
+- Use the local `./.github/workflows/test-image.yml` reference without an `@ref`. GitHub resolves a local reusable workflow from the same commit as the caller.
+- Pass `needs.check.outputs.version`, ensuring tests and publication use the same requested OpenCode version.
+- Run the test job only when `needs_update` is `true`.
+- Grant only `contents: read` to the calling test job.
+- Do not use `secrets: inherit`.
+
+### 4. Make publication depend on the test result
+
+File: `.github/workflows/update-image.yml`
+
+Rename the current `build` job to `publish` so its side effect is explicit. Change its dependencies from only `check` to both `check` and `test`:
+
+```yaml
+  publish:
+    needs: [check, test]
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.check.result == 'success' &&
+        needs.check.outputs.needs_update == 'true' &&
+        needs.test.result == 'success'
+      }}
+```
+
+Requirements:
+
+- Publication must not run if `check` fails.
+- Publication must not run if the reusable test fails, is skipped unexpectedly, or is cancelled.
+- Publication must remain skipped when `needs_update` is `false`.
+- Do not use `always()` by itself; it could allow execution after failures unless every dependency result is guarded explicitly.
+- Keep `packages: write` isolated to the `publish` job.
+- Keep the existing checkout, QEMU, Buildx, GHCR login, multi-platform build/push, version tag, `latest` tag, and post-push manifest inspection.
+- Continue passing `needs.check.outputs.version` as `OPENCODE_VERSION` to the publish build.
+
+Expected failure behavior:
+
+- Release feed or manifest comparison failure: `check` fails; `test` and `publish` do not run.
+- No update needed: `check` succeeds; `test` and `publish` are skipped; the workflow succeeds.
+- Image build or runtime test failure: `test` fails; `publish` is skipped; the workflow fails.
+- Cancellation during checking or testing: `publish` is skipped.
+- Push or manifest inspection failure: `publish` fails and the workflow reports failure.
+
+### 5. Preserve update triggers and decision behavior
+
+File: `.github/workflows/update-image.yml`
+
+Keep all current update entry points:
+
+- Relevant pushes to `main` for `Dockerfile`, `entrypoint.sh`, or `.github/workflows/update-image.yml` force `needs_update=true`.
+- The daily `0 0 * * *` schedule checks for a new stable OpenCode version.
+- Manual dispatch remains available.
+- `force_rebuild=true` forces `needs_update=true` even when manifests match.
+
+Do not add `tests/**` or `.github/workflows/test-image.yml` to the publishing workflow's push paths. Changes only to tests should validate in their pull request, but should not republish an unchanged production image after merge.
+
+Prefer evaluating the `force_rebuild` input as a boolean GitHub expression rather than interpolating it into shell. If the existing shell comparison is retained, verify it behaves correctly for push and schedule events where that input is unset.
+
+## Event Matrix
+
+Verify the resulting workflows against every supported event:
+
+| Event | Update decision | Image tests | Publish |
+| --- | --- | --- | --- |
+| PR changing Dockerfile, entrypoint, tests, or either workflow | Not applicable | Run with `OPENCODE_VERSION=latest` | Never |
+| Relevant push to `main` | Forced update | Run with detected stable version | Only after success |
+| Daily schedule, manifests match | No update | Skip | Skip |
+| Daily schedule, new version or missing manifest | Update | Run with detected stable version | Only after success |
+| Manual dispatch without force, manifests match | No update | Skip | Skip |
+| Manual dispatch with force | Forced update | Run with detected stable version | Only after success |
+| Check failure | Unknown | Skip | Skip |
+| Test failure or cancellation | Update required | Fail/cancel | Skip |
+
+## Verification Plan
+
+### Static validation
+
+Run from the repository root:
+
+```bash
+shellcheck entrypoint.sh tests/test-entrypoint.sh
+sh -n entrypoint.sh
+bash -n tests/test-entrypoint.sh
+git diff --check
+```
+
+Install or use `actionlint` and validate both workflow files:
+
+```bash
+actionlint .github/workflows/test-image.yml .github/workflows/update-image.yml
+```
+
+Confirm the workflow structure manually or with an Actions-aware parser:
+
+- `test-image.yml` includes both `pull_request` and `workflow_call` but no `push` trigger.
+- The reusable input is a string and defaults to `latest`.
+- Both test builds consume the effective input value.
+- `update-image.yml` has `check -> test -> publish` dependencies.
+- Only `publish` has `packages: write`.
+- The schedule remains `0 0 * * *`.
+
+### Pull-request validation
+
+Push the workflow changes to PR #2 and confirm:
+
+- The `Test Docker Image` workflow starts for the workflow changes.
+- Both architecture builds succeed.
+- The loaded runtime image succeeds in `tests/test-entrypoint.sh`.
+- No package publication job runs for the pull request.
+- The check reports the PR head SHA, not the default branch SHA.
+
+### Gating validation
+
+Before merging, inspect the rendered Actions dependency graph and confirm that `publish` depends on the reusable `test` job.
+
+After merging a relevant image-source change to `main`, confirm in one `Update Docker Image` run:
+
+1. `check` sets `needs_update=true` and emits the detected version.
+2. `test` runs using that version.
+3. `publish` remains pending or skipped until `test` completes.
+4. `publish` starts only after `test` succeeds.
+
+Validate the failure gate without publishing a broken image. A safe approach is to inspect a PR run with a deliberately failing test and confirm that the reusable workflow fails, then validate the `publish` condition through `actionlint` and the Actions job graph. Do not merge an intentionally failing test into `main` merely to exercise the production publisher.
+
+### Published image validation
+
+After the first successful gated publication:
+
+```bash
+docker buildx imagetools inspect ghcr.io/asksven/opencode-docker:<version>
+docker buildx imagetools inspect ghcr.io/asksven/opencode-docker:latest
+```
+
+Confirm:
+
+- Both tags resolve successfully.
+- Both tags point to the newly published release.
+- The manifest contains `linux/amd64` and `linux/arm64` images.
+- The workflow's post-push inspection succeeded.
+- Pulling and running `latest` passes the Docker CLI example documented in `README.md`.
+
+### No-update validation
+
+Run a manual dispatch with `force_rebuild=false` after the version and `latest` manifests match. Confirm:
+
+- `check` sets `needs_update=false`.
+- `test` is skipped.
+- `publish` is skipped.
+- The overall workflow is successful rather than failed.
+
+Then run a manual dispatch with `force_rebuild=true` and confirm the complete `check -> test -> publish` path runs.
+
+## Acceptance Criteria
+
+- PR image tests continue to run without package write permission.
+- `test-image.yml` is reusable through `workflow_call`.
+- `test-image.yml` no longer runs independently on pushes to `main`.
+- Both test builds use `latest` for PRs and the detected release version when called by the update workflow.
+- Every source-triggered, scheduled, or manually forced publication requires a successful reusable image test.
+- A failed or cancelled test cannot start the publish job.
+- A no-update run skips both test and publish jobs without failing the workflow.
+- Only the publish job has `packages: write`.
+- The once-daily `0 0 * * *` schedule remains unchanged.
+- The current 15-minute polling cadence is not restored.
+- `actionlint`, shell syntax checks, ShellCheck, and `git diff --check` pass.
+- The first gated publish produces valid amd64 and arm64 manifests for both the version tag and `latest`.
+
+## Scope Boundaries
+
+- Do not change the daily schedule; it is an explicit product decision.
+- Do not replace the workflow dependency with branch-protection assumptions. Branch protection can gate merging, but it does not create a runtime dependency inside a post-merge publication workflow.
+- Do not use a `workflow_run` chain unless the reusable-workflow approach proves impossible.
+- Do not grant package write permission to PR tests or the reusable test job.
+- Do not pass repository secrets to PR-controlled image or entrypoint tests.
+- Do not change Docker socket permissions or weaken `REQUIRE_DOCKER_SOCKET=1` in CI.
+- Do not redesign the image into exact artifact promotion as part of this fix. Testing and publishing rebuild the same commit and OpenCode version, but external package sources can still change between builds; digest-based promotion is a separate enhancement.
+- Do not modify Dockerfile contents, entrypoint behavior, Compose configuration, or user documentation unless required to keep them consistent with the workflow gating change.
+
+## Historical Plan
+
+The remaining sections document the implementation and review history leading to PR #2. They are reference material only and must not override the PR #2 handover above.
+
+### Previous Implementation Review Findings
+
+The original changes below were implemented in PR #2. Their requirements are retained for traceability.
 
 ### Must Fix
 

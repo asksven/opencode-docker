@@ -32,7 +32,7 @@ jobs:
       contents: read
       packages: read
     outputs:
-      needs_update: ${{ steps.compare.outputs.needs_update }}
+      needs_update: ${{ steps.force.outputs.needs_update || steps.compare.outputs.needs_update }}
       version: ${{ steps.release.outputs.version }}
     steps:
       - name: Get latest stable release from feed
@@ -58,16 +58,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Force update for source changes
+        id: force
+        if: ${{ github.event_name == 'push' || inputs.force_rebuild }}
+        run: echo "needs_update=true" >> "$GITHUB_OUTPUT"
+
       - name: Compare against published manifests
         id: compare
+        if: ${{ github.event_name != 'push' && !inputs.force_rebuild }}
         run: |
           set -euo pipefail
           TARGET_VERSION="${{ steps.release.outputs.version }}"
-
-          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.force_rebuild }}" = "true" ]; then
-            echo "needs_update=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
 
           if ! docker manifest inspect "${IMAGE}:${TARGET_VERSION}" > /tmp/target.json 2>/dev/null; then
             echo "needs_update=true" >> "$GITHUB_OUTPUT"
@@ -85,9 +86,24 @@ jobs:
             echo "needs_update=true" >> "$GITHUB_OUTPUT"
           fi
 
-  build:
+  test:
     needs: check
-    if: needs.check.outputs.needs_update == 'true'
+    if: ${{ needs.check.outputs.needs_update == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/test-image.yml
+    with:
+      opencode_version: ${{ needs.check.outputs.version }}
+
+  publish:
+    needs: [check, test]
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.check.result == 'success' &&
+        needs.check.outputs.needs_update == 'true' &&
+        needs.test.result == 'success'
+      }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
