@@ -9,7 +9,7 @@ on:
       - entrypoint.sh
       - .github/workflows/update-image.yml
   schedule:
-    - cron: '0 0 * * *'  # Every day at 00:00 UTC
+    - cron: '*/15 * * * *'  # Every 15 minutes
   workflow_dispatch:
     inputs:
       force_rebuild:
