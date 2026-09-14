@@ -143,12 +143,12 @@ RUN set -euo pipefail; \
     gh --version; \
     glab --version; \
     hadolint --version; \
-    shellcheck --version | head -2; \
+    shellcheck --version; \
     uv --version; \
     uv python find "${PYTHON_VERSION}"; \
     ruff --version; \
     jq --version; \
-    rg --version | head -1
+    rg --version
 
 WORKDIR /workspace
 
