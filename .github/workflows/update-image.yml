@@ -32,7 +32,7 @@ jobs:
       contents: read
       packages: read
     outputs:
-      needs_update: ${{ steps.force.outputs.needs_update || steps.compare.outputs.needs_update }}
+      needs_update: ${{ steps.npm.outputs.ready == 'true' && (steps.force.outputs.needs_update || steps.compare.outputs.needs_update) || 'false' }}
       version: ${{ steps.release.outputs.version }}
     steps:
       - name: Get latest stable release from feed
@@ -51,7 +51,25 @@ jobs:
           fi
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
+      - name: Check npm package availability
+        id: npm
+        run: |
+          set -euo pipefail
+          TARGET_VERSION="${{ steps.release.outputs.version }}"
+
+          for package in opencode-ai opencode-linux-x64 opencode-linux-arm64; do
+            published_version="$(npm view "${package}@${TARGET_VERSION}" version 2>/dev/null || true)"
+            if [ "${published_version}" != "${TARGET_VERSION}" ]; then
+              echo "::notice::${package}@${TARGET_VERSION} is not available from npm yet; a later scheduled run will retry"
+              echo "ready=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
       - name: Login to GitHub Container Registry
+        if: ${{ steps.npm.outputs.ready == 'true' }}
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -60,12 +78,12 @@ jobs:
 
       - name: Force update for source changes
         id: force
-        if: ${{ github.event_name == 'push' || inputs.force_rebuild }}
+        if: ${{ steps.npm.outputs.ready == 'true' && (github.event_name == 'push' || inputs.force_rebuild) }}
         run: echo "needs_update=true" >> "$GITHUB_OUTPUT"
 
       - name: Compare against published manifests
         id: compare
-        if: ${{ github.event_name != 'push' && !inputs.force_rebuild }}
+        if: ${{ steps.npm.outputs.ready == 'true' && github.event_name != 'push' && !inputs.force_rebuild }}
         run: |
           set -euo pipefail
           TARGET_VERSION="${{ steps.release.outputs.version }}"
