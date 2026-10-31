@@ -1,5 +1,10 @@
 name: Update Docker Image
 
+# Renovate-driven build for the opencode 1.x image.
+# Detection no longer polls the releases feed: Renovate watches the npm
+# "opencode-ai" package (see renovate.json), opens a PR bumping the pinned
+# OPENCODE_VERSION in the Dockerfile, and this workflow builds+pushes when that
+# bump (or another Dockerfile/entrypoint/workflow change) lands on main.
 on:
   push:
     branches:
@@ -8,8 +13,6 @@ on:
       - Dockerfile
       - entrypoint.sh
       - .github/workflows/update-image.yml
-  schedule:
-    - cron: '*/15 * * * *'  # Every 15 minutes
   workflow_dispatch:
     inputs:
       force_rebuild:
@@ -32,77 +35,50 @@ jobs:
       contents: read
       packages: read
     outputs:
-      needs_update: ${{ steps.npm.outputs.ready == 'true' && (steps.force.outputs.needs_update || steps.compare.outputs.needs_update) || 'false' }}
-      version: ${{ steps.release.outputs.version }}
+      needs_update: ${{ steps.read.outputs.needs_update }}
+      version: ${{ steps.read.outputs.version }}
     steps:
-      - name: Get latest stable release from feed
-        id: release
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Read pinned OpenCode version from Dockerfile
+        id: read
         run: |
           set -euo pipefail
-          tag="$(
-            curl -fsSL "https://github.com/anomalyco/opencode/releases.atom" \
-              | grep -o 'releases/tag/[^"]*' \
-              | sed 's#releases/tag/##' \
-              | grep -m1 -E '^v?[0-9]+\.[0-9]+\.[0-9]+$'
-          )"
-          if [ -z "$tag" ]; then
-            echo "Could not find a stable release tag in the releases feed" >&2
+          version="$(sed -n 's/^ARG OPENCODE_VERSION=\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' Dockerfile | head -1)"
+          if [ -z "${version}" ]; then
+            echo "No pinned OPENCODE_VERSION (X.Y.Z) found in Dockerfile" >&2
             exit 1
           fi
-          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          # Hard guard: this image MUST stay on the opencode 1.x line. If a 2.x
+          # value ever lands here, refuse loudly instead of publishing it.
+          case "${version}" in
+            1.*) ;;
+            *)
+              echo "Refusing to publish non-1.x opencode version '${version}' to this image" >&2
+              exit 1
+              ;;
+          esac
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
 
-      - name: Check npm package availability
-        id: npm
-        run: |
-          set -euo pipefail
-          TARGET_VERSION="${{ steps.release.outputs.version }}"
+          # A source push (e.g. a merged Renovate bump) or forced rebuild always
+          # rebuilds. Manual dispatch without force skips when the target image
+          # and :latest already point at the same manifest.
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.force_rebuild }}" = "true" ]; then
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
-          for package in opencode-ai opencode-linux-x64 opencode-linux-arm64; do
-            published_version="$(npm view "${package}@${TARGET_VERSION}" version 2>/dev/null || true)"
-            if [ "${published_version}" != "${TARGET_VERSION}" ]; then
-              echo "::notice::${package}@${TARGET_VERSION} is not available from npm yet; a later scheduled run will retry"
-              echo "ready=false" >> "$GITHUB_OUTPUT"
+          if docker manifest inspect "${IMAGE}:${version}" > /tmp/target.json 2>/dev/null; then
+            if docker manifest inspect "${IMAGE}:latest" > /tmp/latest.json 2>/dev/null && \
+               diff -q /tmp/target.json /tmp/latest.json > /dev/null; then
+              echo "needs_update=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-          done
-
-          echo "ready=true" >> "$GITHUB_OUTPUT"
-
-      - name: Login to GitHub Container Registry
-        if: ${{ steps.npm.outputs.ready == 'true' }}
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Force update for source changes
-        id: force
-        if: ${{ steps.npm.outputs.ready == 'true' && (github.event_name == 'push' || inputs.force_rebuild) }}
-        run: echo "needs_update=true" >> "$GITHUB_OUTPUT"
-
-      - name: Compare against published manifests
-        id: compare
-        if: ${{ steps.npm.outputs.ready == 'true' && github.event_name != 'push' && !inputs.force_rebuild }}
-        run: |
-          set -euo pipefail
-          TARGET_VERSION="${{ steps.release.outputs.version }}"
-
-          if ! docker manifest inspect "${IMAGE}:${TARGET_VERSION}" > /tmp/target.json 2>/dev/null; then
-            echo "needs_update=true" >> "$GITHUB_OUTPUT"
-            exit 0
           fi
-
-          if ! docker manifest inspect "${IMAGE}:latest" > /tmp/latest.json 2>/dev/null; then
-            echo "needs_update=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if diff -q /tmp/target.json /tmp/latest.json > /dev/null; then
-            echo "needs_update=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "needs_update=true" >> "$GITHUB_OUTPUT"
-          fi
+          echo "needs_update=true" >> "$GITHUB_OUTPUT"
 
   test:
     needs: check

@@ -10,7 +10,11 @@ FROM node:24.15.0-bookworm
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-ARG OPENCODE_VERSION=latest
+# Renovate maintains this pin as the single source of truth for the opencode
+# 1.x image (npm datasource "opencode-ai", allowedVersions <2.0.0). When a new
+# 1.x release lands, Renovate opens a PR bumping this ARG; on merge the
+# update-image.yml workflow rebuilds and republishes this image.
+ARG OPENCODE_VERSION=1.19.5
 ARG PYTHON_VERSION=3.14
 ARG HADOLINT_VERSION=2.12.0
 # Asset naming changed to lowercase (glab_X_linux_amd64.deb) in later 1.x
