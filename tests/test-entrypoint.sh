@@ -22,6 +22,17 @@ docker run --rm \
         test "$2" = "argument with spaces"
     ' entrypoint-test '' 'argument with spaces'
 
+# herdr-core bundle: hc must be present and runnable as the unprivileged user.
+# Runs via the default entrypoint (exercises the setpriv drop to 12345:12345);
+# the image build already failed loudly if hc was missing, this asserts it
+# explicitly and names it in the test output.
+echo "herdr-core: asserting hc --version"
+docker run --rm \
+    -e PUID=12345 \
+    -e PGID=12345 \
+    "${IMAGE}" \
+    hc --version | grep -qE '^hc [0-9]+\.[0-9]+\.[0-9]+'
+
 if [ ! -S /var/run/docker.sock ]; then
     if [ "${REQUIRE_DOCKER_SOCKET}" = "1" ]; then
         echo "Docker socket tests require /var/run/docker.sock" >&2
