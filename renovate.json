@@ -12,6 +12,16 @@
       "depNameTemplate": "opencode-ai",
       "datasourceTemplate": "npm",
       "versioningTemplate": "semver"
+    },
+    {
+      "description": "Track the herdr-core version pinned in the Dockerfile ARG (github-tags datasource)",
+      "fileMatch": ["(^|/)Dockerfile$"],
+      "matchStrings": [
+        "^ARG HERDR_CORE_VERSION=(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)\\s*$"
+      ],
+      "depNameTemplate": "herdrdev/herdr-core",
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "semver"
     }
   ],
   "packageRules": [
@@ -19,6 +29,11 @@
       "description": "Restrict to the opencode 1.x line; 2.x ships as a separate @opencode/cli package and separate image",
       "matchPackageNames": ["opencode-ai"],
       "allowedVersions": "<2.0.0"
+    },
+    {
+      "description": "herdr-core is pre-1.0; hold this image on the 0.x line",
+      "matchPackageNames": ["herdrdev/herdr-core"],
+      "allowedVersions": "<1.0.0"
     }
   ]
 }

@@ -20,6 +20,11 @@ ARG HADOLINT_VERSION=2.12.0
 # Asset naming changed to lowercase (glab_X_linux_amd64.deb) in later 1.x
 # releases; older tags used Linux_x86_64. Check before downgrading this pin.
 ARG GLAB_VERSION=1.85.3
+# herdr-core (hc): static orchestration binary that hosts coding-agent
+# sessions in persistent terminals. Renovate tracks HERDR_CORE_VERSION via
+# github-tags (herdrdev/herdr-core); the release manifest pins the arch URL
+# and sha256 for each version.
+ARG HERDR_CORE_VERSION=0.1.21
 # TARGETARCH is populated automatically by buildx.
 ARG TARGETARCH
 
@@ -95,6 +100,25 @@ RUN case "${TARGETARCH}" in \
     && hadolint --version
 
 # ---------------------------------------------------------------------------
+# herdr-core: static Linux binary from the herdr release server (per arch, on
+# the 0.x line pinned in HERDR_CORE_VERSION). Ships as both `herdr-core` and
+# the `hc` alias; the container also runs opencode under hc so the session is
+# hostable/viewable from a herdr client.
+# ---------------------------------------------------------------------------
+RUN case "${TARGETARCH}" in \
+        amd64) herdr_arch="x86_64" ;; \
+        arm64) herdr_arch="aarch64" ;; \
+        *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /tmp/herdr-core.tar.gz \
+        "https://releases.herdr.dev/core/${HERDR_CORE_VERSION}/herdr-core-linux-${herdr_arch}.tar.gz" \
+    && tar -xzf /tmp/herdr-core.tar.gz -C /tmp \
+    && install -m 0755 /tmp/herdr-core /usr/local/bin/herdr-core \
+    && ln -sf herdr-core /usr/local/bin/hc \
+    && rm -f /tmp/herdr-core.tar.gz /tmp/LICENSE /tmp/THIRD-PARTY-NOTICES \
+    && hc --version
+
+# ---------------------------------------------------------------------------
 # Python toolchain via uv. Interpreters land in a world-readable /opt so the
 # non-root opencode user can use them; without UV_PYTHON_INSTALL_DIR they
 # would go to /root/.local and be unreadable.
@@ -146,6 +170,7 @@ RUN set -euo pipefail; \
     docker compose version; \
     gh --version; \
     glab --version; \
+    hc --version; \
     hadolint --version; \
     shellcheck --version; \
     uv --version; \
