@@ -55,6 +55,71 @@ docker run --rm \
 
 When the socket is mounted and the container uses the default root-starting entrypoint, the entrypoint grants the unprivileged process access through the socket's numeric group ID. Overriding the container user bypasses this setup and may make a `0660` socket inaccessible unless its groups are configured externally. Docker socket access is effectively root-level access to the host, so only enable this mount for trusted workloads.
 
+### Herdr (herdr-core)
+
+The image bundles `herdr-core` (the `hc` orchestration binary) so a harness
+container can host its opencode process under herdr and expose the session to a
+herdr client (app or `hc`) over SSH. The version is pinned in the Dockerfile as
+`ARG HERDR_CORE_VERSION` and maintained by Renovate via the
+`herdrdev/herdr-core` GitHub tags datasource.
+
+```bash
+hc --version          # confirm the bundled herdr-core binary
+docker compose run --rm opencode hc --version
+```
+
+To run opencode as a herdr-hosted session instead of the default standalone
+server, start herdr and run opencode under it inside the container:
+
+```bash
+hc server start
+hc run --name opencode opencode serve --hostname 0.0.0.0 --port 4096 --print-logs --log-level DEBUG
+hc ls                                   # the opencode session appears here
+```
+
+Client-side (e.g. from the Mac), attach to the container with `hc machine add`
+or the herdr app and the opencode session becomes visible/attachable there.
+herdr does not access models itself; the agent keeps its own provider route.
+
+#### Testing the herdr bundle (local build, pre-merge)
+
+The PR itself does **not** publish the image (its test only builds and discards
+it). To validate the herdr bundle before merge, build it locally from the branch
+and exercise it there:
+
+```bash
+# from a checkout of the PR branch
+git fetch origin feat/herdr-core-image && git checkout feat/herdr-core-image
+docker buildx build --load -t opencode-docker:local .
+docker run --rm opencode-docker:local hc --version   # expect: hc 0.1.21
+```
+
+To run the stack with opencode **hosted under herdr** instead of the bare
+default server, override the `opencode` service in `docker-compose.yml`:
+
+```yaml
+services:
+  opencode:
+    image: opencode-docker:local   # the local herdr-enabled build above
+    command: sh -c "hc server start && hc run --name opencode opencode serve --hostname 0.0.0.0 --port 4096 --print-logs --log-level DEBUG"
+```
+
+Then confirm the session is hosted inside the container:
+
+```bash
+docker compose up -d
+docker compose exec opencode hc ls   # shows the "opencode" terminal
+```
+
+From a herdr client (app or `hc`), add that machine and attach to the opencode
+session over SSH (e.g. reach into the container through the host):
+
+```bash
+hc machine add --name <box> --via 'ssh <user>@<host> docker exec -i opencode'
+hc ls
+hc attach <box>/opencode
+```
+
 ### LLM Provider Authentication
 
 To authenticate with LLM providers, you can create an `auth.json` file in the `/home/opencode/.local/share/opencode` directory with the following structure:
